@@ -1,0 +1,19 @@
+[project]
+name = "vault-lsp"
+version = "0.1.0"
+description = "A language server for a vault of markdown notes linked with [[wikilinks]]"
+requires-python = ">=3.10"
+dependencies = ["pygls>=2.0,<3"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+vault-lsp = "vault_lsp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["vault_lsp*"]
