@@ -149,10 +149,23 @@ function M.attach(bufnr)
   }, { bufnr = bufnr })
 end
 
+-- Colors for links. The server tags every [[link]] as a "wikilink" semantic
+-- token, adding the "missing" modifier when the note doesn't exist, and
+-- Neovim highlights them with these groups. `default = true` means a
+-- colorscheme or your own nvim_set_hl() call takes precedence.
+local function set_highlights()
+  vim.api.nvim_set_hl(0, "@lsp.type.wikilink", { link = "Underlined", default = true })
+  vim.api.nvim_set_hl(0, "@lsp.typemod.wikilink.missing", { link = "Comment", default = true })
+end
+
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
 
   local group = vim.api.nvim_create_augroup("vault", { clear = true })
+
+  set_highlights()
+  -- :colorscheme clears highlight groups, so restore the defaults after it.
+  vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = set_highlights })
   vim.api.nvim_create_autocmd("FileType", {
     group = group,
     pattern = "markdown",

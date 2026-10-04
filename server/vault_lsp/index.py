@@ -29,12 +29,20 @@ class Link:
     end: int              # column just past the closing "]]"
 
 
+def links_in(line: str) -> list[Link]:
+    """Every wikilink on `line`, left to right."""
+    links = []
+    for m in WIKILINK.finditer(line):
+        heading = (m.group("heading") or "").strip() or None
+        links.append(Link(m.group("target").strip(), heading, m.start(), m.end()))
+    return links
+
+
 def link_at(line: str, column: int) -> Link | None:
     """Return the wikilink that covers `column` on `line`, if any."""
-    for m in WIKILINK.finditer(line):
-        if m.start() <= column < m.end():
-            heading = (m.group("heading") or "").strip() or None
-            return Link(m.group("target").strip(), heading, m.start(), m.end())
+    for link in links_in(line):
+        if link.start <= column < link.end:
+            return link
     return None
 
 
@@ -76,11 +84,16 @@ class VaultIndex:
             self.add(path)
         return sum(len(paths) for paths in self._notes.values())
 
-    def add(self, path: Path) -> None:
+    def add(self, path: Path) -> bool:
+        """Add a note to the index. Returns True if it wasn't there before."""
         relative = self._relative(path)
         if relative is None or relative.suffix != ".md" or _is_hidden(relative):
-            return
-        self._notes.setdefault(relative.stem.lower(), set()).add(relative)
+            return False
+        paths = self._notes.setdefault(relative.stem.lower(), set())
+        if relative in paths:
+            return False
+        paths.add(relative)
+        return True
 
     def _relative(self, path: Path) -> Path | None:
         try:

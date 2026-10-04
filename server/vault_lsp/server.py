@@ -1,7 +1,9 @@
 """The vault language server.
 
 Standard LSP features:
-  textDocument/definition   follow the [[wikilink]] under the cursor
+  textDocument/definition       follow the [[wikilink]] under the cursor
+  textDocument/semanticTokens   mark each [[wikilink]] as existing or missing,
+                                so the editor can color them differently
 
 Custom commands (called through workspace/executeCommand by the Lua plugin):
   vault.linkAtCursor        describe the link under the cursor, for missing notes
@@ -17,11 +19,16 @@ from pathlib import Path
 from lsprotocol import types
 from pygls.lsp.server import LanguageServer
 from pygls.uris import from_fs_path, to_fs_path
+from pygls.workspace.position_codec import ServerTextPosition
 
 from . import __version__
-from .index import CONFIG_FILE, Link, VaultIndex, heading_line, link_at
+from .index import CONFIG_FILE, Link, VaultIndex, heading_line, link_at, links_in
 
-log = logging.getLogger("vault-lsp")
+# Semantic token legend. Neovim highlights these as @lsp.type.wikilink and,
+# for missing notes, also @lsp.typemod.wikilink.missing.
+TOKEN_TYPES = ["wikilink"]
+TOKEN_MODIFIERS = ["missing"]
+MISSING = 1 << TOKEN_MODIFIERS.index("missing")
 
 
 class VaultServer(LanguageServer):
@@ -38,6 +45,17 @@ class VaultServer(LanguageServer):
         # points. The document's codec converts between them.
         server_position = document.position_from_client_units(position)
         return link_at(document.lines[server_position.line], server_position.character)
+
+    def refresh_link_colors(self) -> None:
+        """Ask the editor to re-request semantic tokens for open notes.
+
+        Needed when a note is created: links to it elsewhere change from
+        missing to existing even though their text didn't change.
+        """
+        workspace = self.client_capabilities.workspace
+        tokens = workspace.semantic_tokens if workspace else None
+        if tokens and tokens.refresh_support:
+            self.workspace_semantic_tokens_refresh(None)
 
 
 server = VaultServer()
@@ -67,15 +85,41 @@ def on_initialized(ls: VaultServer, params: types.InitializedParams) -> None:
 
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
 def on_did_open(ls: VaultServer, params: types.DidOpenTextDocumentParams) -> None:
-    if ls.index:
-        ls.index.add(Path(to_fs_path(params.text_document.uri)))
+    path = Path(to_fs_path(params.text_document.uri))
+    # A buffer for a file that isn't on disk yet gets added when it's saved.
+    if ls.index and path.is_file():
+        ls.index.add(path)
 
 
 @server.feature(types.TEXT_DOCUMENT_DID_SAVE)
 def on_did_save(ls: VaultServer, params: types.DidSaveTextDocumentParams) -> None:
-    # A note created with :edit only exists on disk once it's saved.
-    if ls.index:
-        ls.index.add(Path(to_fs_path(params.text_document.uri)))
+    if ls.index and ls.index.add(Path(to_fs_path(params.text_document.uri))):
+        ls.refresh_link_colors()
+
+
+@server.feature(
+    types.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    types.SemanticTokensLegend(token_types=TOKEN_TYPES, token_modifiers=TOKEN_MODIFIERS),
+)
+def semantic_tokens(ls: VaultServer, params: types.SemanticTokensParams) -> types.SemanticTokens:
+    if ls.index is None:
+        return types.SemanticTokens(data=[])
+    document = ls.workspace.get_text_document(params.text_document.uri)
+
+    # Each token is five integers: line and start column (both relative to
+    # the previous token), length, token type, and a bitmask of modifiers.
+    data: list[int] = []
+    previous_line = previous_start = 0
+    for number, line in enumerate(document.lines):
+        for link in links_in(line):
+            start = document.position_to_client_units(ServerTextPosition(number, link.start))
+            end = document.position_to_client_units(ServerTextPosition(number, link.end))
+            line_delta = number - previous_line
+            start_delta = start.character - previous_start if line_delta == 0 else start.character
+            modifiers = 0 if ls.index.resolve(link.target) else MISSING
+            data += [line_delta, start_delta, end.character - start.character, 0, modifiers]
+            previous_line, previous_start = number, start.character
+    return types.SemanticTokens(data=data)
 
 
 @server.feature(types.TEXT_DOCUMENT_DEFINITION)
@@ -117,14 +161,17 @@ def create_note(ls: VaultServer, target: str, folder: str) -> str:
     if ls.index is None:
         raise RuntimeError("vault-lsp hasn't finished starting")
     path = ls.index.create_note(target, folder)
-    log.info("created %s", path)
+    ls.window_log_message(types.LogMessageParams(type=types.MessageType.Info, message=f"vault-lsp: created {path}"))
+    ls.refresh_link_colors()
     return from_fs_path(str(path))
 
 
 def main() -> None:
-    # stdout carries the protocol, so logs go to stderr. Neovim records them
-    # in its LSP log (:lua vim.cmd.edit(vim.lsp.get_log_path())).
-    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+    # stdout carries the protocol, so Python logging goes to stderr, which
+    # Neovim records in its LSP log as errors. Keep it to real problems:
+    # routine messages use window_log_message instead. (pygls also logs every
+    # message it sends at INFO level, which would flood the log.)
+    logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
     server.start_io()
 
 

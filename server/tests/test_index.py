@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vault_lsp.index import VaultIndex, heading_line, link_at
+from vault_lsp.index import VaultIndex, heading_line, link_at, links_in
 
 
 # -- parsing -------------------------------------------------------------------
@@ -29,6 +29,11 @@ def test_link_at_heading_and_alias():
 
 def test_link_at_ignores_text_outside_links():
     assert link_at("no links here", 3) is None
+
+
+def test_links_in_returns_spans_in_order():
+    line = "x [[a]] y [[b#h|c]]"
+    assert [(l.target, l.start, l.end) for l in links_in(line)] == [("a", 2, 7), ("b", 10, 19)]
 
 
 # -- index ---------------------------------------------------------------------
@@ -95,3 +100,10 @@ def test_create_note_never_overwrites(vault):
 def test_heading_line(vault):
     assert heading_line(vault.root / "Inbox.md", "goals") == 2
     assert heading_line(vault.root / "Inbox.md", "missing") == 0
+
+
+def test_add_reports_whether_note_is_new(vault):
+    assert vault.add(vault.root / "Inbox.md") is False
+    (vault.root / "Later.md").write_text("")
+    assert vault.add(vault.root / "Later.md") is True
+    assert vault.add(vault.root / "Later.md") is False

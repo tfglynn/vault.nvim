@@ -19,6 +19,8 @@ for settings later.
   in (or lets you type a new one), then creates and opens it. A link that
   names its own folder, like `[[ideas/Thing]]`, is created there without asking.
 - `gf` anywhere else behaves like the built-in `gf`.
+- Links are colored by whether their note exists, and recolor as soon as a
+  missing note is created.
 - Standard LSP "go to definition" (`vim.lsp.buf.definition()`) also follows
   links, so existing LSP keymaps work too.
 
@@ -54,6 +56,28 @@ Without a plugin manager: add the folder to `runtimepath` and call
 
 **3. Make a vault:** `mkdir ~/notes && echo '{}' > ~/notes/vault.json`
 
+## Link colors
+
+The server marks every `[[link]]` as a `wikilink` semantic token and adds a
+`missing` modifier when the note doesn't exist. Neovim highlights them with:
+
+| Group | Applies to | Default |
+|---|---|---|
+| `@lsp.type.wikilink` | every link | links to `Underlined` |
+| `@lsp.typemod.wikilink.missing` | links to missing notes, on top of the above | links to `Comment` |
+
+Both are combined on missing links, so by default those are underlined in
+the `Comment` color. To change them, set the groups after your colorscheme
+loads, for example:
+
+```lua
+vim.api.nvim_set_hl(0, "@lsp.type.wikilink", { fg = "#7aa2f7", underline = true })
+vim.api.nvim_set_hl(0, "@lsp.typemod.wikilink.missing", { fg = "#f7768e", italic = true })
+```
+
+The plugin's defaults use `default = true`, so your settings and any
+colorscheme that defines these groups take precedence.
+
 ## How it fits together
 
 ```
@@ -70,6 +94,10 @@ Without a plugin manager: add the folder to `runtimepath` and call
       vim.ui.select a folder
       vault.createNote(target, folder) ───→ write the file, add to index
       ← uri, :edit it
+
+ every redraw → semanticTokens/full ──────→ each [[link]]: existing or missing
+      ← token list
+                  ←── semanticTokens/refresh  after a note is created
 ```
 
 The folder prompt lives on the Lua side because a definition request can only
@@ -79,25 +107,31 @@ it picks up telescope, fzf-lua, dressing.nvim or snacks if you've configured one
 - `server/vault_lsp/index.py`: link parsing, the index and note creation. It
   has no LSP code, which keeps it easy to test.
 - `server/vault_lsp/server.py`: the LSP handlers.
-- `lua/vault/init.lua`: starting the server, `gf`, and the folder prompt.
+- `lua/vault/init.lua`: starting the server, `gf`, the folder prompt and the
+  default link colors.
 
 ## Debugging
 
 - `:LspInfo` (with nvim-lspconfig) or `:lua print(vim.inspect(vim.lsp.get_active_clients()))`
   shows whether the server attached.
 - Server logs go to Neovim's LSP log: `:lua vim.cmd.edit(vim.lsp.get_log_path())`.
+  Raise its detail with `:lua vim.lsp.set_log_level("debug")`.
+- To see what's under the cursor, including link tokens, run `:Inspect`.
 - You can run `vault-lsp` in a terminal; it will sit waiting for JSON-RPC on
   stdin, which at least proves it starts.
 
 ## Tests
 
 ```sh
-cd server && pytest                                     # index and parsing
-nvim --headless -u NONE -c "luafile tests/e2e.lua"      # real Neovim + real server
+cd server && pytest                                         # index and parsing
+nvim -u NONE -c "luafile tests/e2e.lua" 2>results.txt       # real Neovim + real server
 ```
 
-The end-to-end test builds a throwaway vault and drives the plugin. It
-passes on Neovim 0.9.5 and 0.12.
+The end-to-end test builds a throwaway vault, drives the plugin, writes
+PASS/FAIL lines to `results.txt` and quits (non-zero exit on failure). Run it
+in a terminal rather than with `--headless`: Neovim 0.9 only draws link
+colors while redrawing the screen, so the color checks need a UI. It passes
+on Neovim 0.9.5 and 0.12.
 
 ## Known limits of the stub
 

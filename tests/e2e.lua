@@ -1,6 +1,8 @@
 -- End-to-end check: real Neovim + real vault-lsp against a throwaway vault.
 -- Run from the repo root:
---   nvim --headless -u NONE -c "luafile tests/e2e.lua"
+--   nvim -u NONE -c "luafile tests/e2e.lua" 2>results.txt
+-- Results go to stderr and the exit code is non-zero on failure. Run it with
+-- a UI rather than --headless: Neovim 0.9 only draws link colors on redraw.
 
 local repo = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(repo)
@@ -8,7 +10,7 @@ vim.cmd("filetype on")
 
 local failures = 0
 local function check(name, ok, detail)
-  print((ok and "PASS " or "FAIL ") .. name .. (ok and "" or ("  -- " .. tostring(detail))))
+  io.stderr:write((ok and "PASS " or "FAIL ") .. name .. (ok and "" or ("  -- " .. tostring(detail))) .. "\n")
   if not ok then
     failures = failures + 1
   end
@@ -26,6 +28,7 @@ write("index.md", {
   "Go to [[Alpha#Goals]] or [[alpha]].",
   "Missing: [[Brand New]] and [[ideas/Deep Idea]] and [[Fresh Folder Note]].",
   "Plain text here.",
+  "Emoji 🙂🙂 then [[Alpha]] ok",
 })
 write("projects/Alpha.md", { "# Alpha", "", "## Goals", "ship it" })
 
@@ -33,10 +36,34 @@ require("vault").setup()
 
 local function current() return vim.fn.resolve(vim.api.nvim_buf_get_name(0)) end
 local function cursor_on(text)
-  vim.cmd.edit(vim.fn.fnameescape(root .. "/index.md"))
+  if current() ~= root .. "/index.md" then
+    vim.cmd.edit(vim.fn.fnameescape(root .. "/index.md"))
+  end
   vim.fn.cursor(1, 1)
   assert(vim.fn.search("\\V" .. text, "cw") > 0, "text not found: " .. text)
 end
+-- Semantic-token highlight groups at the start of `text` in index.md.
+local function groups_at(text)
+  cursor_on(text)
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+  -- Neovim 0.9 only places token highlights while redrawing the screen.
+  vim.cmd.redraw()
+  local groups = {}
+  for _, token in ipairs(vim.inspect_pos(0, row - 1, col).semantic_tokens) do
+    table.insert(groups, token.opts.hl_group)
+  end
+  return table.concat(groups, " ")
+end
+local function wait_groups(text, pattern, plain_absent)
+  local got
+  vim.wait(3000, function()
+    got = groups_at(text)
+    if plain_absent then return got ~= "" and not got:find(pattern, 1, true) end
+    return got:find(pattern, 1, true) ~= nil
+  end, 50)
+  return got
+end
+
 local function follow_and_wait(expected)
   require("vault").follow()
   return vim.wait(3000, function() return current() == expected end, 20)
@@ -49,6 +76,17 @@ local attached = vim.wait(5000, function()
 end, 50)
 check("server attaches inside a vault", attached)
 vim.wait(1000) -- let the initial scan finish
+
+-- 0. Link colors.
+local g = wait_groups("Alpha#Goals", "@lsp.type.wikilink")
+check("existing link is a wikilink token", g:find("@lsp.type.wikilink", 1, true) and not g:find("missing"), g)
+g = wait_groups("Brand New", "@lsp.typemod.wikilink.missing")
+check("missing link has the missing modifier", g:find("@lsp.typemod.wikilink.missing", 1, true), g)
+g = wait_groups("Alpha]] ok", "@lsp.type.wikilink")
+check("token lines up after emoji", g:find("@lsp.type.wikilink", 1, true), g)
+check("no token on plain text after emoji", groups_at("then") == "", groups_at("then"))
+check("no token after the link", groups_at("ok") == "", groups_at("ok"))
+check("default highlight for wikilinks", vim.api.nvim_get_hl(0, { name = "@lsp.type.wikilink" }).link == "Underlined")
 
 -- 1. Existing link with a heading.
 cursor_on("Alpha#Goals")
@@ -70,6 +108,9 @@ cursor_on("Brand New")
 check("creates missing note in chosen folder", follow_and_wait(root .. "/projects/Brand New.md"), current())
 check("offered root, projects and new-folder", offered and vim.deep_equal(offered, { "(vault root)", "projects", "+ New folder…" }), vim.inspect(offered))
 check("new note has a title", vim.fn.readfile(root .. "/projects/Brand New.md")[1] == "# Brand New")
+
+g = wait_groups("Brand New", "missing", true)
+check("creating a note recolors links to it", g ~= "" and not g:find("missing"), g)
 
 -- 4. Following the same link again now resolves without prompting.
 local prompted = false
@@ -107,5 +148,5 @@ vim.wait(300)
 local get = vim.lsp.get_clients or vim.lsp.get_active_clients
 check("no server outside a vault", #get({ name = "vault", bufnr = 0 }) == 0)
 
-print(failures == 0 and "ALL PASSED" or (failures .. " FAILED"))
+io.stderr:write((failures == 0 and "ALL PASSED" or (failures .. " FAILED")) .. "\n")
 vim.cmd(failures == 0 and "qa!" or "cq!")
