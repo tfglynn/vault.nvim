@@ -12,7 +12,9 @@ local defaults = {
   -- File that marks the root of a vault.
   marker = "vault.json",
   -- Buffer-local key for following links in vault notes; false to disable.
-  follow_key = "gf",
+  follow_key = "<return>",
+  next_link_key = "<tab>",
+  prev_link_key = "<S-tab>",
 }
 
 M.config = vim.deepcopy(defaults)
@@ -126,6 +128,85 @@ function M.follow()
   end)
 end
 
+local function get_cursor_pos()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local line = cursor[1] - 1 -- adjust line number for 0-indexing
+  local character = vim.lsp.util.character_offset(0, line, cursor[2], "utf-8")
+  return { line = line, character = character }
+end
+
+local function greater_position(a, b)
+  return (
+    a.line > b.line or
+    a.line == b.line and a.character > b.character
+  )
+end
+
+local function lesser_position(a, b)
+  return (
+    a.line < b.line or
+    a.line == b.line and a.character < b.character
+  )
+end
+
+local function go_to_next_link(links)
+  local window = vim.api.nvim_get_current_win()
+  local cursor = get_cursor_pos()
+  for _, link in ipairs(links) do
+    local start = link.range.start
+    if greater_position(start, cursor) then
+      vim.api.nvim_win_set_cursor(window, {start.line + 1, start.character})
+      return
+    end
+  end
+  -- Go back to start
+  if #links > 0 then
+    local start = links[1].range.start
+    vim.api.nvim_win_set_cursor(window, {start.line + 1, start.character})
+  end
+end
+
+local function go_to_prev_link(links)
+  local window = vim.api.nvim_get_current_win()
+  local cursor = get_cursor_pos()
+  for i = #links, 1, -1 do
+    local start = links[i].range.start
+    if lesser_position(start, cursor) then
+      vim.api.nvim_win_set_cursor(window, {start.line + 1, start.character})
+      return
+    end
+  end
+  -- Go back to end
+  if #links > 0 then
+    local start = links[#links].range.start
+    vim.api.nvim_win_set_cursor(window, {start.line + 1, start.character})
+  end
+end
+
+function M.next_link()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local client = client_for(bufnr)
+  if not client then
+    vim.notify("vault: this buffer isn't a note in a vault", vim.log.levels.WARN)
+    return
+  end
+
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  request(client, "textDocument/documentLink", params, bufnr, go_to_next_link)
+end
+
+function M.prev_link()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local client = client_for(bufnr)
+  if not client then
+    vim.notify("vault: this buffer isn't a note in a vault", vim.log.levels.WARN)
+    return
+  end
+
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  request(client, "textDocument/documentLink", params, bufnr, go_to_prev_link)
+end
+
 --- Start (or reuse) the language server for `bufnr` if it's inside a vault.
 function M.attach(bufnr)
   local root = find_root(bufnr)
@@ -144,6 +225,12 @@ function M.attach(bufnr)
     on_attach = function(_, attached)
       if M.config.follow_key then
         vim.keymap.set("n", M.config.follow_key, M.follow, { buffer = attached, desc = "Follow [[wikilink]]" })
+      end
+      if M.config.next_link_key then
+        vim.keymap.set("n", M.config.next_link_key, M.next_link, { buffer = attached, desc = "Go to next [[wikilink]]" })
+      end
+      if M.config.prev_link_key then
+        vim.keymap.set("n", M.config.prev_link_key, M.prev_link, { buffer = attached, desc = "Go to next [[wikilink]]" })
       end
     end,
   }, { bufnr = bufnr })

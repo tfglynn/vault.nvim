@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from lsprotocol import types
@@ -29,6 +30,7 @@ from .index import CONFIG_FILE, Link, VaultIndex, heading_line, link_at, links_i
 TOKEN_TYPES = ["wikilink"]
 TOKEN_MODIFIERS = ["missing"]
 MISSING = 1 << TOKEN_MODIFIERS.index("missing")
+LINK = re.compile(r"\[\[[\w |/]+\]\]")
 
 
 class VaultServer(LanguageServer):
@@ -136,6 +138,28 @@ def definition(ls: VaultServer, params: types.DefinitionParams) -> types.Locatio
     line = heading_line(path, link.heading) if link.heading else 0
     start = types.Position(line=line, character=0)
     return types.Location(uri=from_fs_path(str(path)), range=types.Range(start=start, end=start))
+
+
+@server.feature(types.TEXT_DOCUMENT_DOCUMENT_LINK)
+def document_links(params: types.DocumentLinkParams) -> list[types.DocumentLink]:
+    """Return a list of links contained in the document."""
+    items = []
+    document_uri = params.text_document.uri
+    document = server.workspace.get_text_document(document_uri)
+
+    for linum, line in enumerate(document.lines):
+        for match in LINK.finditer(line):
+            start_char, end_char = match.span()
+            items.append(
+                types.DocumentLink(
+                    range=types.Range(
+                        start=types.Position(line=linum, character=start_char),
+                        end=types.Position(line=linum, character=end_char),
+                    ),
+                ),
+            )
+
+    return items
 
 
 @server.command("vault.linkAtCursor")
