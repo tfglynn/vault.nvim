@@ -277,6 +277,34 @@ local function show_suggestions(start_col, result)
   completion.active = true
 end
 
+-- Other plugins that pop up their own completion menu as you type would
+-- replace ours inside a link. Pause them there and resume when you leave it.
+local paused = {} -- bufnr -> true while other auto-completion is paused
+
+-- deoplete.nvim shows its menu by feeding these keys to itself; making them
+-- do nothing in this buffer stops every way it has of replacing our menu.
+local DEOPLETE_KEYS = { "<Plug>_", "<Plug>+" }
+
+local function set_others_paused(bufnr, pause)
+  if (paused[bufnr] or false) == pause then
+    return
+  end
+  paused[bufnr] = pause or nil
+  if vim.g.loaded_deoplete then
+    for _, key in ipairs(DEOPLETE_KEYS) do
+      if pause then
+        vim.keymap.set("i", key, "", { buffer = bufnr })
+      else
+        pcall(vim.keymap.del, "i", key, { buffer = bufnr })
+      end
+    end
+    -- Also saves deoplete the work of gathering words while paused.
+    pcall(vim.api.nvim_buf_call, bufnr, function()
+      vim.fn["deoplete#custom#buffer_option"]("auto_complete", not pause)
+    end)
+  end
+end
+
 local function update_suggestions(bufnr)
   if completion.skip_next then
     completion.skip_next = false
@@ -291,6 +319,7 @@ local function update_suggestions(bufnr)
   local line = vim.api.nvim_get_current_line()
   local query = line:sub(1, col):match(OPEN_LINK)
   completion.seq = completion.seq + 1
+  set_others_paused(bufnr, query ~= nil)
   if not query then
     close_popup()
     return
@@ -373,6 +402,17 @@ local function enable_completion(bufnr)
       update_suggestions(bufnr)
     end,
   })
+  -- Decide before each typed character goes in whether we're in a link, so
+  -- other completion plugins are paused before they react to the change.
+  vim.api.nvim_create_autocmd("InsertCharPre", {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      local col = vim.api.nvim_win_get_cursor(0)[2]
+      local before = vim.api.nvim_get_current_line():sub(1, col) .. vim.v.char
+      set_others_paused(bufnr, before:match(OPEN_LINK) ~= nil)
+    end,
+  })
   vim.api.nvim_create_autocmd("CompleteDone", { group = group, buffer = bufnr, callback = on_complete_done })
   vim.api.nvim_create_autocmd("InsertLeave", {
     group = group,
@@ -382,6 +422,7 @@ local function enable_completion(bufnr)
       completion.active = false
       completion.skip_next = false
       restore_completeopt()
+      set_others_paused(bufnr, false)
     end,
   })
 

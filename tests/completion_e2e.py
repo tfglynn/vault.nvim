@@ -27,6 +27,7 @@ NOTES = [
     "Unrelated.md",
     "a/Dup.md",
     "b/c/Dup.md",
+    "notes/The Split Stump.md",
 ]
 
 failures = 0
@@ -115,6 +116,20 @@ def main() -> int:
     type_keys("<Tab>x")
     check("existing ]] isn't doubled and the cursor skips it",
           nvim.current.line == "[[Foo]]x", nvim.current.line)
+
+    # Names with spaces: the query can match any word, and keep matching
+    # after a space or a backspace.
+    new_line("[[sp")
+    wait_for(lambda: menu())
+    check("[[sp finds 'The Split Stump'", menu() == ["The Split Stump"], menu())
+    type_keys("<BS>")
+    check("backspace keeps the menu", "The Split Stump" in menu(), menu())
+    type_keys("<C-u>[[the sp")
+    wait_for(lambda: menu() == ["The Split Stump"])
+    check("[[the sp still matches across the space", menu() == ["The Split Stump"], menu())
+    type_keys("<Tab>")
+    check("Tab inserts the whole name with spaces", nvim.current.line == "[[The Split Stump]]",
+          nvim.current.line)
 
     # Notes that share a name get a folder prefix where needed.
     new_line("[[dup")
