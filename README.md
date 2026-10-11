@@ -101,6 +101,11 @@ you use one, set `complete = false` so the plugin's own menu doesn't compete
 with it. The server does the fuzzy ranking itself and returns items in order,
 so a completion plugin's own sorting may reorder them.
 
+deoplete.nvim works alongside the plugin's own menu without any setup: while
+the cursor is inside an unfinished `[[`, deoplete is paused so its word
+suggestions don't replace the note suggestions, and it resumes as soon as you
+leave the link.
+
 ## How it fits together
 
 ```
