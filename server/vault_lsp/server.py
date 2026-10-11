@@ -2,6 +2,7 @@
 
 Standard LSP features:
   textDocument/definition       follow the [[wikilink]] under the cursor
+  textDocument/completion       after "[[", suggest notes whose names fuzzy-match
   textDocument/semanticTokens   mark each [[wikilink]] as existing or missing,
                                 so the editor can color them differently
 
@@ -23,7 +24,7 @@ from pygls.uris import from_fs_path, to_fs_path
 from pygls.workspace.position_codec import ServerTextPosition
 
 from . import __version__
-from .index import CONFIG_FILE, Link, VaultIndex, heading_line, link_at, links_in
+from .index import CONFIG_FILE, Link, VaultIndex, heading_line, link_at, links_in, open_link_query
 
 # Semantic token legend. Neovim highlights these as @lsp.type.wikilink and,
 # for missing notes, also @lsp.typemod.wikilink.missing.
@@ -138,6 +139,43 @@ def definition(ls: VaultServer, params: types.DefinitionParams) -> types.Locatio
     line = heading_line(path, link.heading) if link.heading else 0
     start = types.Position(line=line, character=0)
     return types.Location(uri=from_fs_path(str(path)), range=types.Range(start=start, end=start))
+
+
+@server.feature(types.TEXT_DOCUMENT_COMPLETION, types.CompletionOptions(trigger_characters=["["]))
+def completion(ls: VaultServer, params: types.CompletionParams) -> types.CompletionList | None:
+    if ls.index is None:
+        return None
+    document = ls.workspace.get_text_document(params.text_document.uri)
+    if params.position.line >= len(document.lines):
+        return None
+    position = document.position_from_client_units(params.position)
+    line = document.lines[position.line].rstrip("\r\n")
+    query = open_link_query(line[: position.character])
+    if query is None:
+        return None
+
+    # Replace what's been typed after "[[" and close the link, unless the
+    # closing brackets are already there (typed earlier, or auto-paired).
+    start = document.position_to_client_units(
+        ServerTextPosition(position.line, position.character - len(query)))
+    replace = types.Range(start=start, end=params.position)
+    close = "" if line[position.character:].startswith("]]") else "]]"
+
+    items = []
+    for rank, suggestion in enumerate(ls.index.suggest(query)):
+        folder = suggestion.path.parent.as_posix()
+        items.append(types.CompletionItem(
+            label=suggestion.path.stem,
+            kind=types.CompletionItemKind.File,
+            detail=None if folder == "." else folder,
+            # The server has already ranked and filtered; keep its order and
+            # make sure clients that filter again don't drop fuzzy matches.
+            sort_text=f"{rank:05d}",
+            filter_text=query + suggestion.name,
+            text_edit=types.TextEdit(range=replace, new_text=suggestion.name + close),
+        ))
+    # Results depend on the whole query, so ask again as the user types.
+    return types.CompletionList(is_incomplete=True, items=items)
 
 
 @server.feature(types.TEXT_DOCUMENT_DOCUMENT_LINK)

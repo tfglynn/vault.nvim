@@ -21,6 +21,17 @@ for settings later.
 - `gf` anywhere else behaves like the built-in `gf`.
 - Links are colored by whether their note exists, and recolor as soon as a
   missing note is created.
+- Typing `[[` suggests notes from anywhere in the vault, fuzzy-matched on the
+  name: `[[foo` offers `Foo` (even deep in `some/nested/folder/`), `Foobar`
+  and `Barfoo`, best matches first. The list narrows as you type.
+  - `Tab` accepts the highlighted suggestion, or the first one if none is
+    highlighted, and closes the link with `]]` (skipping over `]]` that's
+    already there). `Ctrl-n`/`Ctrl-p` move through the list.
+  - When two notes share a name, the suggestion adds just enough of the
+    folder path to pick the right one, e.g. `[[c/Dup]]`.
+  - A query with a `/` matches against the whole path: `[[nested/fo`.
+  - Without a suggestion menu open, `Tab` in insert mode does whatever it did
+    before; in normal mode it still jumps between links.
 - Standard LSP "go to definition" (`vim.lsp.buf.definition()`) also follows
   links, so existing LSP keymaps work too.
 
@@ -46,7 +57,11 @@ changes to the Python code take effect the next time Neovim starts the server.
     -- defaults:
     -- cmd = { "vault-lsp" },
     -- marker = "vault.json",
-    -- follow_key = "gf",   -- false to disable
+    -- follow_key = "<return>", -- false to disable
+    -- next_link_key = "<tab>",
+    -- prev_link_key = "<S-tab>",
+    -- complete = true,         -- [[ suggestions; false if you use nvim-cmp etc.
+    -- accept_key = "<tab>",    -- insert-mode key that accepts a suggestion
   },
 }
 ```
@@ -78,6 +93,14 @@ vim.api.nvim_set_hl(0, "@lsp.typemod.wikilink.missing", { fg = "#f7768e", italic
 The plugin's defaults use `default = true`, so your settings and any
 colorscheme that defines these groups take precedence.
 
+## Completion plugins
+
+The suggestions come from standard LSP completion (`textDocument/completion`),
+so nvim-cmp, blink.cmp and similar can show them through their LSP source. If
+you use one, set `complete = false` so the plugin's own menu doesn't compete
+with it. The server does the fuzzy ranking itself and returns items in order,
+so a completion plugin's own sorting may reorder them.
+
 ## How it fits together
 
 ```
@@ -95,6 +118,9 @@ colorscheme that defines these groups take precedence.
       vault.createNote(target, folder) ───→ write the file, add to index
       ← uri, :edit it
 
+ typing after [[ → textDocument/completion → fuzzy-match note names
+      ← ranked suggestions, shown with complete()
+
  every redraw → semanticTokens/full ──────→ each [[link]]: existing or missing
       ← token list
                   ←── semanticTokens/refresh  after a note is created
@@ -104,11 +130,12 @@ The folder prompt lives on the Lua side because a definition request can only
 return a location; it can't ask questions. The prompt uses `vim.ui.select`, so
 it picks up telescope, fzf-lua, dressing.nvim or snacks if you've configured one.
 
-- `server/vault_lsp/index.py`: link parsing, the index and note creation. It
+- `server/vault_lsp/index.py`: link parsing, the index, fuzzy matching and
+  note creation. It
   has no LSP code, which keeps it easy to test.
 - `server/vault_lsp/server.py`: the LSP handlers.
-- `lua/vault/init.lua`: starting the server, `gf`, the folder prompt and the
-  default link colors.
+- `lua/vault/init.lua`: starting the server, following links, the folder
+  prompt, the `[[` suggestion menu and the default link colors.
 
 ## Debugging
 
@@ -125,7 +152,11 @@ it picks up telescope, fzf-lua, dressing.nvim or snacks if you've configured one
 ```sh
 cd server && pytest                                         # index and parsing
 nvim -u NONE -c "luafile tests/e2e.lua" 2>results.txt       # real Neovim + real server
+python tests/completion_e2e.py                              # [[ completion, typed keystrokes
 ```
+
+`tests/completion_e2e.py` needs `pynvim` (included in `pip install -e './server[test]'`)
+and runs Neovim in the background, so it works without a terminal.
 
 The end-to-end test builds a throwaway vault, drives the plugin, writes
 PASS/FAIL lines to `results.txt` and quits (non-zero exit on failure). Run it
@@ -143,8 +174,8 @@ on Neovim 0.9.5 and 0.12.
 
 ## Next steps
 
-1. Completion after `[[`, from the index (`textDocument/completion`).
-2. Backlinks via `textDocument/references`.
-3. Watch the vault for outside changes (`workspace/didChangeWatchedFiles`).
-4. Move the index into SQLite (links, tags, frontmatter tables).
-5. Rename a note and update every link to it (`textDocument/rename`).
+1. Backlinks via `textDocument/references`.
+2. Watch the vault for outside changes (`workspace/didChangeWatchedFiles`).
+3. Move the index into SQLite (links, tags, frontmatter tables).
+4. Rename a note and update every link to it (`textDocument/rename`).
+5. Complete headings after `[[Note#`.

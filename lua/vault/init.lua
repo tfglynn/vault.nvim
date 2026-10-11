@@ -15,6 +15,13 @@ local defaults = {
   follow_key = "<return>",
   next_link_key = "<tab>",
   prev_link_key = "<S-tab>",
+  -- Show note suggestions while typing after "[[". Set to false if you'd
+  -- rather get them from a completion plugin (nvim-cmp, blink.cmp, ...),
+  -- which can use the server's standard LSP completion directly.
+  complete = true,
+  -- Insert-mode key that accepts the highlighted (or first) suggestion.
+  -- Without a suggestion menu open, it does whatever it did before.
+  accept_key = "<tab>",
 }
 
 M.config = vim.deepcopy(defaults)
@@ -207,6 +214,191 @@ function M.prev_link()
   request(client, "textDocument/documentLink", params, bufnr, go_to_prev_link)
 end
 
+-- Completion after "[[" ------------------------------------------------------
+--
+-- Neovim's built-in completion filters by prefix, so it would hide "Barfoo"
+-- when you type "foo". Instead, every keystroke inside an unfinished link
+-- asks the server, which does the fuzzy matching, and the popup shows its
+-- results unfiltered.
+
+local OPEN_LINK = "%[%[([^%[%]|#]*)$"
+
+local completion = {
+  seq = 0,           -- drops replies to requests the user has typed past
+  active = false,    -- the popup on screen is ours
+  skip_next = false, -- ignore the text change from accepting a suggestion
+  saved_completeopt = nil,
+}
+
+-- The popup needs to show even one match and select nothing until asked.
+-- 'completeopt' is global before Neovim 0.11, so swap it only while our
+-- popup is open.
+local function use_our_completeopt()
+  if completion.saved_completeopt == nil then
+    completion.saved_completeopt = vim.o.completeopt
+  end
+  vim.o.completeopt = "menuone,noselect"
+end
+
+local function restore_completeopt()
+  if completion.saved_completeopt ~= nil then
+    vim.o.completeopt = completion.saved_completeopt
+    completion.saved_completeopt = nil
+  end
+end
+
+local function close_popup()
+  if completion.active and vim.fn.pumvisible() == 1 then
+    vim.fn.complete(vim.fn.col("."), {})
+  end
+  completion.active = false
+end
+
+local function show_suggestions(start_col, result)
+  local items = {}
+  for _, item in ipairs(result and (result.items or result) or {}) do
+    table.insert(items, {
+      word = item.textEdit and item.textEdit.newText or item.insertText or item.label,
+      abbr = item.label,
+      menu = item.detail,
+      equal = 1, -- the server already filtered; don't filter again
+      dup = 1,
+      user_data = { vault = true },
+    })
+  end
+  if #items == 0 then
+    close_popup()
+    return
+  end
+  use_our_completeopt()
+  -- complete() ends any popup already open, which runs CompleteDone, so
+  -- only mark the new one as ours afterwards.
+  vim.fn.complete(start_col, items)
+  completion.active = true
+end
+
+local function update_suggestions(bufnr)
+  if completion.skip_next then
+    completion.skip_next = false
+    return
+  end
+  local client = client_for(bufnr)
+  if not client or vim.api.nvim_get_current_buf() ~= bufnr then
+    return
+  end
+
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+  local line = vim.api.nvim_get_current_line()
+  local query = line:sub(1, col):match(OPEN_LINK)
+  completion.seq = completion.seq + 1
+  if not query then
+    close_popup()
+    return
+  end
+
+  local seq = completion.seq
+  local start_col = col - #query + 1 -- 1-based byte column just after "[["
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  request(client, "textDocument/completion", params, bufnr, function(result)
+    -- Ignore stale replies: the user kept typing or left insert mode.
+    if seq ~= completion.seq or vim.fn.mode():sub(1, 1) ~= "i" then
+      return
+    end
+    local now_row, now_col = unpack(vim.api.nvim_win_get_cursor(0))
+    if now_row ~= row or now_col ~= col or vim.api.nvim_get_current_buf() ~= bufnr then
+      return
+    end
+    show_suggestions(start_col, result)
+  end)
+end
+
+local function on_complete_done()
+  local item = vim.v.completed_item
+  local ours = completion.active and type(item) == "table" and type(item.user_data) == "table"
+    and item.user_data.vault
+  completion.active = false
+  -- Restore the user's 'completeopt', unless a new popup replaced ours.
+  vim.schedule(function()
+    if not completion.active then
+      restore_completeopt()
+    end
+  end)
+  if not ours or (item.word or "") == "" then
+    return
+  end
+  -- Accepted a suggestion: don't reopen the menu for the text it inserted,
+  -- and step over closing brackets that were already there.
+  completion.skip_next = true
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+  if vim.api.nvim_get_current_line():sub(col + 1, col + 2) == "]]" then
+    vim.api.nvim_win_set_cursor(0, { row, col + 2 })
+  end
+end
+
+-- What `accept_key` did before this plugin mapped it, for when no
+-- suggestions are showing.
+local function fallback_keys(key, previous)
+  if previous and not vim.tbl_isempty(previous) and previous.buffer ~= 1 then
+    local keys
+    if previous.callback then
+      keys = previous.callback()
+      if previous.expr ~= 1 then
+        return ""
+      end
+    elseif previous.rhs and previous.rhs ~= "" then
+      keys = previous.expr == 1 and vim.api.nvim_eval(previous.rhs) or previous.rhs
+    end
+    if keys then
+      -- Expression mappings may return "<Tab>"-style key names (Neovim
+      -- 0.11's own snippet mapping does); plain mappings always use them.
+      if previous.expr ~= 1 or previous.replace_keycodes == 1 then
+        keys = vim.api.nvim_replace_termcodes(keys, true, true, true)
+      end
+      return keys
+    end
+  end
+  return vim.api.nvim_replace_termcodes(key, true, true, true)
+end
+
+local function enable_completion(bufnr)
+  local group = vim.api.nvim_create_augroup("vault_complete_" .. bufnr, { clear = true })
+  vim.api.nvim_create_autocmd({ "TextChangedI", "TextChangedP" }, {
+    group = group,
+    buffer = bufnr,
+    callback = function(args)
+      -- Moving through the menu inserts each suggestion in turn; that isn't typing.
+      if args.event == "TextChangedP" and vim.fn.complete_info({ "selected" }).selected ~= -1 then
+        return
+      end
+      update_suggestions(bufnr)
+    end,
+  })
+  vim.api.nvim_create_autocmd("CompleteDone", { group = group, buffer = bufnr, callback = on_complete_done })
+  vim.api.nvim_create_autocmd("InsertLeave", {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      completion.seq = completion.seq + 1
+      completion.active = false
+      completion.skip_next = false
+      restore_completeopt()
+    end,
+  })
+
+  local key = M.config.accept_key
+  if key then
+    local previous = vim.fn.maparg(key, "i", false, true)
+    vim.keymap.set("i", key, function()
+      if completion.active and vim.fn.pumvisible() == 1 then
+        local selected = vim.fn.complete_info({ "selected" }).selected
+        local keys = selected == -1 and "<C-n><C-y>" or "<C-y>"
+        return vim.api.nvim_replace_termcodes(keys, true, true, true)
+      end
+      return fallback_keys(key, previous)
+    end, { buffer = bufnr, expr = true, replace_keycodes = false, desc = "Accept [[wikilink]] suggestion" })
+  end
+end
+
 --- Start (or reuse) the language server for `bufnr` if it's inside a vault.
 function M.attach(bufnr)
   local root = find_root(bufnr)
@@ -230,7 +422,10 @@ function M.attach(bufnr)
         vim.keymap.set("n", M.config.next_link_key, M.next_link, { buffer = attached, desc = "Go to next [[wikilink]]" })
       end
       if M.config.prev_link_key then
-        vim.keymap.set("n", M.config.prev_link_key, M.prev_link, { buffer = attached, desc = "Go to next [[wikilink]]" })
+        vim.keymap.set("n", M.config.prev_link_key, M.prev_link, { buffer = attached, desc = "Go to previous [[wikilink]]" })
+      end
+      if M.config.complete then
+        enable_completion(attached)
       end
     end,
   }, { bufnr = bufnr })

@@ -63,6 +63,64 @@ def _is_hidden(relative: Path) -> bool:
     return any(part.startswith(".") for part in relative.parts)
 
 
+# The unfinished link before the cursor: "[[" followed by a name with no
+# closing brackets, heading or alias yet.
+OPEN_LINK = re.compile(r"\[\[(?P<query>[^\[\]|#]*)$")
+
+
+def open_link_query(before_cursor: str) -> str | None:
+    """The partial note name being typed after "[[", or None if not in a link.
+
+    `before_cursor` is the line up to the cursor. "see [[Fo" gives "Fo".
+    """
+    m = OPEN_LINK.search(before_cursor)
+    return m.group("query") if m else None
+
+
+def fuzzy_score(query: str, text: str) -> tuple[int, int] | None:
+    """How well `query` matches `text`, lower is better; None if it doesn't.
+
+    Case-insensitive. The query's characters must appear in order, but not
+    necessarily together. Exact names beat prefixes, prefixes beat matches
+    at the start of a word, which beat matches mid-word, which beat
+    scattered characters (fewer gaps first).
+    """
+    q, t = query.lower(), text.lower()
+    if not q:
+        return (0, 0)
+    if t == q:
+        return (0, 0)
+    if t.startswith(q):
+        return (1, 0)
+    position = t.find(q)
+    if position >= 0:
+        # Prefer a match that starts a word: "Bar Foo", "bar-foo", "barFoo".
+        while position >= 0:
+            if not text[position - 1].isalnum() or (text[position].isupper() and text[position - 1].islower()):
+                return (2, position)
+            position = t.find(q, position + 1)
+        return (3, t.find(q))
+
+    # Scattered characters: count the gaps between matched characters.
+    gaps = 0
+    start = 0
+    previous = -1
+    for char in q:
+        found = t.find(char, start)
+        if found < 0:
+            return None
+        if previous >= 0 and found != previous + 1:
+            gaps += 1
+        previous, start = found, found + 1
+    return (4, gaps)
+
+
+@dataclass(frozen=True)
+class Suggestion:
+    name: str        # what to insert after "[[": "Foo" or "nested/Foo" if "Foo" is ambiguous
+    path: Path       # relative to the vault root, with ".md"
+
+
 class VaultIndex:
     """An in-memory map of note name -> paths.
 
@@ -124,6 +182,41 @@ class VaultIndex:
             return None
         best = min(candidates, key=lambda p: (len(p.parts), p.as_posix().lower()))
         return self.root / best
+
+    def link_name(self, relative: Path) -> str:
+        """The shortest link text that resolves to `relative`.
+
+        Usually just the file name; if another note with the same name wins
+        a bare [[name]], prefix as many folders as it takes to tell them apart.
+        """
+        parts = relative.with_suffix("").parts
+        for count in range(1, len(parts) + 1):
+            name = "/".join(parts[-count:])
+            if self.resolve(name) == self.root / relative:
+                return name
+        return "/".join(parts)
+
+    def suggest(self, query: str, limit: int = 50) -> list[Suggestion]:
+        """Notes whose names fuzzy-match `query`, best first.
+
+        Matches against the file name wherever the note lives. A query with
+        a "/" in it ("proj/al") matches against the whole path instead.
+        """
+        query = query.strip()
+        scored = []
+        for relatives in self._notes.values():
+            for relative in relatives:
+                if not (self.root / relative).is_file():
+                    continue
+                if "/" in query:
+                    score = fuzzy_score(query, relative.with_suffix("").as_posix())
+                else:
+                    score = fuzzy_score(query, relative.stem)
+                if score is not None:
+                    key = (score, len(relative.stem), len(relative.parts), relative.as_posix().lower())
+                    scored.append((key, relative))
+        scored.sort()
+        return [Suggestion(self.link_name(relative), relative) for _, relative in scored[:limit]]
 
     def folders(self) -> list[str]:
         """Every non-hidden folder in the vault, relative to the root ("." first)."""
